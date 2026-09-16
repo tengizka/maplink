@@ -8,10 +8,23 @@
 
   АУТЕНТИФИКАЦИЯ: anon key, identity = telegram_id (Supabase Auth НЕ используется).
   ТАБЛИЦЫ (не дропать!): users, places, photos, friendships, achievements, reactions, comments.
+  Restore-схема (восстановлена по коду, сверять с живой базой!): supabase/migrations/0000_reference_schema.sql.
   Storage bucket: place-photos (public read; write/delete тоже разрешены через policy на storage.objects).
 
+  ЗАЩИТА — читать перед тем, как трогать вывод любых данных (подробности: docs/SECURITY.md):
+  - ЛЮБОЙ текст из БД / Telegram / Nominatim / Wikipedia перед попаданием в innerHTML
+    прогоняется через esc(); uuid и прочие id — через safeId(); ссылки на картинки —
+    через safeImgUrl(); текст на запись — через cleanName/cleanCity/cleanCountry/cleanNote.
+    Хелперы определены в начале __maplinkMain(). Не придумывай свои.
+  - Данные НЕ положены в inline-обработчики: onclick="fn('${имя}')" — так делать
+    нельзя, даже с экранированием. Для этого есть data-* + dataset (см. rankRowHtml).
+  - Вне Telegram приложение read-only (гейт на экране + guard на fetch): не создаёт
+    пользователя в users и не пропускает записи. Отладка в браузере — "?demo=1".
+  - Не ужесточай RLS вслепую: всё живёт на anon key, субъекта в JWT нет. Единственный
+    безопасный шаг без бэкенда — supabase/migrations/0001_optional_device_secret.sql
+    (+ флаг USE_INSTALL_SECRET в index.html), и он по умолчанию выключен.
+
   ПРАВИЛА:
-  - Не ужесточай RLS без бэкенда — всё работает через anon key на клиенте.
   - Новые фичи, завязанные на таблицы/колонки, которых может не быть — делай graceful degrade
     (try/catch, тихий фолбэк), не ломай остальное приложение.
   - Не дропай и не truncate'и таблицы без явной прямой просьбы пользователя.
@@ -23,10 +36,22 @@
   - Фото по умолчанию (когда пользователь не прикрепил своё): вики-город → вики-страна →
     флаг страны из словаря → REST Countries API как последний фолбэк. Всегда должно
     показаться ХОТЬ ЧТО-ТО (иконка-заглушка минимум), пустых карточек быть не должно.
+  - Nominatim — только через nominatimSearch(): там очередь с интервалом и отмена
+    устаревших запросов. Не дёргай fetch по своему URL.
   - Известный баг-паттерн: iOS Telegram WebView размывает текст при CSS transform на
     рукописном шрифте — анимации на сплэше используют margin/color, не transform.
   - Известный баг-паттерн: старые версии Telegram WebApp (6.0) падают на tg.CloudStorage —
     вызывать только через tg.isVersionAtLeast('6.9'), иначе localStorage.
+  - После правки: cd tools/verify && npm install && npm run verify — jsdom-бут index.html в трёх
+    режимах (Telegram / ?demo=1 / браузер без Telegram): XSS-проба, проклик всех экранов,
+    проверка что каждый getElementById попадает в существующий id, синтаксис JS и CSS.
+    Это единственная страховка, которая ловит «тихие» поломки — прогоняй перед коммитом.
+    Точечно: node tools/verify/scan-xss.mjs index.html — статический поиск вставок вида
+    ${u.username} без esc().
+
+  ИСТОРИЯ: письмо-пасхалка с паролем удалено (клиентская «защита» паролем — иллюзия);
+  вход в подарок теперь — строка «Подарок» в настройках → openPuzzle().
+  Картинка головоломки вынесена в assets/puzzle.jpg.
 
   Если что-то не работает или непонятно в коде — читай инлайн-комментарии рядом с функцией,
   их довольно много. Удачи!
@@ -37,11 +62,26 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, minimum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="color-scheme" content="light">
+<!-- Defence-in-depth: даже если в DOM когда-нибудь попадёт чужой скрипт, ему некуда
+     сливать данные — connect-src разрешает только наши источники.
+     style-src/script-src с unsafe-inline, т.к. приложение намеренно один файл. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; base-uri 'self'; form-action 'none'; frame-ancestors 'self' https://web.telegram.org https://*.telegram.org; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://telegram.org https://*.telegram.org; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob: https:; connect-src 'self' https://cdn.jsdelivr.net https://*.supabase.co https://tiles.openfreemap.org https://nominatim.openstreetmap.org https://restcountries.com https://flagcdn.com https://*.wikimedia.org https://*.wikipedia.org https://telegram.org; worker-src 'self' blob:; object-src 'none'; frame-src 'self' https://web.telegram.org">
+<meta name="theme-color" content="#FBF3EE">
 <title>MapLink</title>
 
+<!-- гремим соединения: TCP+TLS заранее для всего, что нужно на первом экране -->
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+<link rel="preconnect" href="https://wfepsxuvvgfloatrfqba.supabase.co">
+<link rel="preconnect" href="https://tiles.openfreemap.org" crossorigin>
+<link rel="dns-prefetch" href="https://nominatim.openstreetmap.org">
+<link rel="dns-prefetch" href="https://flagcdn.com">
+<link rel="dns-prefetch" href="https://upload.wikimedia.org">
+<link rel="dns-prefetch" href="https://restcountries.com">
+
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/maplibre-gl@5/dist/maplibre-gl.js"></script>
+<!-- defer: HTML парсится, пока качаются библиотеки; приложение стартует по DOMContentLoaded -->
+<script defer src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/maplibre-gl@5/dist/maplibre-gl.js"></script>
 <link href="https://cdn.jsdelivr.net/npm/maplibre-gl@5/dist/maplibre-gl.css" rel="stylesheet">
 
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -98,6 +138,13 @@
   }
 
   /* ---------------- SPLASH ---------------- */
+  /* длинные списки: браузер не рисует то, что вне экрана
+     (заметно дешевле скролл ленты/профиля на слабых Android-WebView) */
+  .journal-ticket, .diary-entry, .friend-row, .rank-row, .feed-month-head{
+    content-visibility: auto;
+    contain-intrinsic-size: auto 120px;
+  }
+
   #splash{
     position:fixed; inset:0;
     background:#FBF3EE;
@@ -864,7 +911,7 @@
     background:var(--rose); color:#fff; flex-shrink:0;
   }
   .mini-btn.ghost{ background:var(--blush); color:var(--rose-deep); }
-  
+
   .friends-head{
     display:flex; flex-direction:column; gap:10px;
     margin:18px 0 12px;
@@ -1427,7 +1474,7 @@
     from{ opacity:0; transform:translateY(6px); }
     to{ opacity:1; transform:translateY(0); }
   }
-  
+
   /* feed notebook month divider */
   .feed-cal-month{
     font-family:'Caveat',cursive; font-weight:700; font-size:22px;
@@ -1758,7 +1805,7 @@
   .maplibregl-popup-tip{ display:none !important; }
 
   /* ---------------- ADD / EDIT PLACE MODAL ---------------- */
-  
+
   .add-step-dots{ display:flex; gap:6px; justify-content:center; margin-bottom:12px; }
   .add-dot{
     width:7px; height:7px; border-radius:50%;
@@ -2495,7 +2542,7 @@
     align-self: stretch;
     order: 2;
   }
-  
+
   #tutorial.tut-welcome .tut-logo{
     display: none !important;
   }
@@ -2551,7 +2598,7 @@
     padding: 4px 8px !important;
     order: 2;
   }
-  
+
 
   /* live tips — handwritten, airy */
   #tutorial.tut-live .tut-card{
@@ -2690,7 +2737,7 @@
   }
 
 
-  
+
 
 
   #tutorial.tut-welcome .tut-brand{
@@ -3195,7 +3242,15 @@
 </div>
 
 <script>
-(function(){
+// Всё приложение — одна большая функция __maplinkMain(): она стартует только когда
+// DOM готов И defer-библиотеки (supabase, maplibre) загрузились. См. бутстрэппер в конце файла.
+function __maplinkMain(){
+  // Вне Telegram и без ?demo показываем экран-приглашение и выходим СРАЗУ:
+  // до регистрации слушателей и таймеров — иначе они будут дёргать состояние,
+  // которого нет (put this check before anything else touches the DOM/DB).
+  const __tgBoot = window.Telegram && window.Telegram.WebApp;
+  const __tgBootUser = __tgBoot && __tgBoot.initDataUnsafe && __tgBoot.initDataUnsafe.user;
+  if(!__tgBootUser && !/[?&]demo\b/.test(location.search)){ showTelegramGate(); return; }
 
   // =====================================================================
   //  SECURITY HELPERS
@@ -3427,6 +3482,12 @@
   const tg = window.Telegram ? window.Telegram.WebApp : null;
   let tgUser = null;
   let startParam = null;
+  // MapLink — это Mini App: настоящий вход только из Telegram.
+  // Вне Telegram приложение работает «на чтение»: не заводит пользователя в базе
+  // и не пропускает ни одной записи (см. __installReadOnlyGuard ниже).
+  // Для отладки в обычном браузере: ?demo=1 — интерфейс живой, запись отключена.
+  let inTelegram = false;
+  const IS_WEB_DEMO = /[?&]demo\b/.test(location.search);
   if(tg){
     tg.ready();
     tg.expand();
@@ -3452,9 +3513,36 @@
     tgUser = tg.initDataUnsafe && tg.initDataUnsafe.user ? tg.initDataUnsafe.user : null;
     startParam = tg.initDataUnsafe && tg.initDataUnsafe.start_param ? tg.initDataUnsafe.start_param : null;
   }
-  // fallback for testing outside Telegram
-  if(!tgUser){
-    tgUser = { id: 'test_'+Math.floor(Math.random()*10000), first_name: 'Гость', username: 'guest', photo_url: '' };
+  inTelegram = !!(tg && tg.initDataUnsafe && tg.initDataUnsafe.user);
+  const readOnly = !inTelegram;
+  if(!tgUser && IS_WEB_DEMO){
+    tgUser = { id: 'demo_' + Math.floor(Math.random() * 1e9), first_name: 'Гость', username: 'demo', photo_url: '' };
+  }
+
+  function showTelegramGate(){
+    const g = document.createElement('div');
+    g.id = 'tgGate';
+    g.innerHTML =
+      '<div class="tgg-card">' +
+        '<div class="tgg-title">MapLink</div>' +
+        '<div class="tgg-text">Это Telegram Mini App. Открой его внутри Telegram —' +
+        ' так он видит твой профиль и синхронизирует поездки с друзьями.</div>' +
+        '<a class="tgg-btn" href="https://t.me/MapLinkAppbot/MapLink">Открыть в Telegram</a>' +
+        '<div class="tgg-hint">для просмотра без записи: добавь ?demo=1</div>' +
+      '</div>';
+    const st = document.createElement('style');
+    st.textContent =
+      '#tgGate{position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;' +
+      'padding:24px;background:var(--cream,#FBF3EE)}' +
+      '.tgg-card{max-width:340px;text-align:center;background:var(--card,#fff);border-radius:24px;' +
+      'padding:26px 22px;box-shadow:0 18px 44px -22px rgba(58,46,43,.45)}' +
+      '.tgg-title{font-family:Fraunces,serif;font-style:italic;font-size:26px;color:var(--rose-deep,#C57B85);margin-bottom:10px}' +
+      '.tgg-text{font-size:14px;line-height:1.55;color:var(--ink,#3A2E2B);margin-bottom:18px}' +
+      '.tgg-btn{display:inline-block;padding:12px 18px;border-radius:16px;background:var(--rose,#C57B85);' +
+      'color:#fff;font-weight:700;text-decoration:none;font-size:14px}' +
+      '.tgg-hint{margin-top:14px;font-size:11.5px;color:var(--muted,#9A8A85)}';
+    document.head.appendChild(st);
+    document.body.appendChild(g);
   }
 
   document.getElementById('profileName').textContent = tgUser.first_name || tgUser.username || 'Пользователь';
@@ -4307,7 +4395,14 @@
     }, 500);
   }
   showQuote();
-  setInterval(showQuote, 9000);
+  // тикаем, только когда полоска с цитатой реально видима: в скрытом WebView
+  // таймер будил отрисовку каждые 9 секунд без всякого смысла
+  setInterval(()=>{
+    if(document.hidden) return;
+    const strip = document.getElementById('quoteStrip');
+    if(strip && strip.offsetParent === null) return;
+    showQuote();
+  }, 9000);
 
   // ---------- Tutorial: cards on real UI + farewell ----------
   const tutSteps = [
@@ -4659,21 +4754,98 @@
   const SUPABASE_URL = 'https://wfepsxuvvgfloatrfqba.supabase.co';
   const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndmZXBzeHV2dmdmbG9hdHJmcWJhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ3OTU4MDMsImV4cCI6MjEwMDM3MTgwM30.y774GJ5oDxEzCL_z6gJxSHBR8P3wGfE0qSB4LswiUpk';
 
+  // ---------- опциональный per-install секрет ----------
+  // По умолчанию ВЫКЛЮЧЕНО. Включается только вместе с политиками из
+  // supabase/migrations/0001_optional_device_secret.sql — иначе (политики есть,
+  // секрета нет / секрета нет, а политики включили) приложение перестаёт писать.
+  // Порядок включения и проверка CORS описаны в шапке того файла.
+  const USE_INSTALL_SECRET = false;
+  const SECRET_KEY = 'ml_install_secret';
+  function installSecret(){
+    let cur = null;
+    try{ cur = localStorage.getItem(SECRET_KEY); }catch(e){}
+    if(cur && /^[a-f0-9]{48}$/.test(cur)) return cur;
+    const n = 24, buf = new Uint8Array(n);
+    try{ (window.crypto && window.crypto.getRandomValues) ? window.crypto.getRandomValues(buf) : buf.forEach((_,i)=>{ buf[i] = Math.floor(Math.random()*256); }); }
+    catch(e){ buf.forEach((_,i)=>{ buf[i] = Math.floor(Math.random()*256); }); }
+    const fresh = Array.from(buf, b=>b.toString(16).padStart(2,'0')).join('');
+    try{ localStorage.setItem(SECRET_KEY, fresh); }catch(e){}
+    return fresh;
+  }
+  async function sha256Hex(str){
+    try{
+      const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
+      return Array.from(new Uint8Array(buf), b=>b.toString(16).padStart(2,'0')).join('');
+    }catch(e){ return null; }
+  }
+
   const statusEl = document.getElementById('connStatus');
-  const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  const __clientOpts = USE_INSTALL_SECRET ? { global: { headers: { 'x-ml-secret': installSecret() } } } : {};
+  const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, __clientOpts);
+  __installReadOnlyGuard();
+
+  // Единая точка отсечения записи. Мы НЕ трогаем RLS (по правилам проекта всё живёт
+  // на anon key), зато снаружи Telegram ни один insert/update/delete/storage.upload
+  // не уйдёт в PostgREST — даже если какой-то новый код забудет проверку.
+  function __installReadOnlyGuard(){
+    if(!readOnly) return;
+    if(typeof window.fetch !== 'function') return;
+    const raw = window.fetch.bind(window);
+    window.fetch = function(input, init){
+      let url = '';
+      try{ url = typeof input === 'string' ? input : (input && input.url) || ''; }catch(e){}
+      let method = 'GET';
+      try{ method = String((init && init.method) || (input && input.method) || 'GET').toUpperCase(); }catch(e){}
+      if(url.indexOf('.supabase.co') !== -1 && method !== 'GET' && method !== 'HEAD'){
+        // 405 + тело в формате PostgREST: все вызывающие места увидят штатный error.
+        // Объект-подделка вместо new Response(): в старых WebView Response может не быть.
+        const body = { message: 'MapLink вне Telegram работает только на чтение', code: '42501' };
+        const text = JSON.stringify(body);
+        return Promise.resolve({
+          ok: false, status: 405, statusText: 'Method Not Allowed', bodyUsed: true,
+          headers: { get: ()=> null },
+          text: ()=> Promise.resolve(text),
+          json: ()=> Promise.resolve(body),
+          arrayBuffer: ()=> Promise.resolve(new ArrayBuffer(0)),
+          blob: ()=> Promise.resolve(new Blob ? new Blob([text]) : null)
+        });
+      }
+      return raw(input, init);
+    };
+  }
   let myUserId = null;
   let myInviteCode = null;
 
   function randomCode(){
-    return Math.random().toString(36).slice(2, 8) + Math.random().toString(36).slice(2, 5);
+    // crypto вместо Math.random: код инвайта — это по сути доступ к профилю
+    // (по нему другой человек добавляется тебе в друзья без подтверждения)
+    const ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; // без I/O/0/1/L — удобнее продиктовать
+    const n = 10;
+    let out = '';
+    try{
+      const buf = new Uint8Array(n);
+      (window.crypto || {}).getRandomValues ? window.crypto.getRandomValues(buf) : (()=>{ throw 0; })();
+      for(let i = 0; i < n; i++) out += ALPHABET[buf[i] % ALPHABET.length];
+      return out;
+    }catch(e){
+      for(let i = 0; i < n; i++) out += ALPHABET[Math.floor(Math.random() * ALPHABET.length)];
+      return out;
+    }
   }
 
   async function initUser(){
+    if(readOnly){
+      // демо/веб: не заводим строку в users — иначе каждая ссылка на GitHub Pages
+      // плодит «гостей» в общей базе
+      try{ statusEl.textContent = 'только просмотр — открой через Telegram'; }catch(e){}
+      try{ showUxHintsOff(); }catch(e){}
+      return;
+    }
     try{
       const { data, error } = await supabase.from('users').upsert({
         telegram_id: String(tgUser.id),
-        username: tgUser.username || tgUser.first_name || 'user',
-        avatar_url: tgUser.photo_url || null
+        username: cleanName(tgUser.username || tgUser.first_name || 'user'),
+        avatar_url: safeImgUrl(tgUser.photo_url) || null
       }, { onConflict: 'telegram_id' }).select().single();
 
       if(error){ statusEl.textContent = 'ошибка: '+error.message; return; }
@@ -4686,8 +4858,18 @@
         await supabase.from('users').update({ invite_code: myInviteCode }).eq('id', myUserId);
       }
 
+      // регистрация секрета установки — только когда включён режим RLS из 0001_*.sql
+      if(USE_INSTALL_SECRET && myUserId){
+        try{
+          const h = await sha256Hex(installSecret());
+          if(h) await supabase.from('users').update({ access_secret_hash: h }).eq('id', myUserId);
+        }catch(e){ console.warn('install secret не записан:', e && e.message); }
+      }
+
       // handle invite link open (?startapp=CODE)
-      if(startParam && startParam !== myInviteCode){
+      // код приглашения: только короткий «безопасный» алфавит, чтобы не гонять
+      // произвольную строку в ilike/eq по чужим invite_code
+      if(startParam && /^[A-Za-z0-9_-]{4,16}$/.test(startParam) && startParam !== myInviteCode){
         const { data: other } = await supabase.from('users').select('id').eq('invite_code', startParam).single();
         if(other && other.id){
           await supabase.from('friendships').upsert({
@@ -4743,6 +4925,14 @@
       alert('Не удалось сохранить имя');
     }
   });
+
+  // подарочную картинку греем в idle: на старте она не нужна, а к моменту открытия
+  // головоломки уже будет в декодированном виде
+  try{
+    const warm = ()=>{ try{ const i = new Image(); i.src = PUZZLE_IMG; }catch(e){} };
+    if('requestIdleCallback' in window) window.requestIdleCallback(warm, { timeout: 8000 });
+    else setTimeout(warm, 4000);
+  }catch(e){}
 
   initUser();
 
@@ -4835,17 +5025,17 @@
         : '<div class="fstat">пока без поездок</div>';
 
       const av = escAttr(safeImgUrl(f.avatar_url));
-            const fid = safeId(f.id);
-            const fn = escAttr(f.username || 'друг');
-            const fa = escAttr(safeImgUrl(f.avatar_url));
-            return '<div class="friend-row" style="animation-delay:'+Math.min(i*0.04,0.28)+'s">'
-              + '<div class="fav" data-fid="'+fid+'" data-fn="'+fn+'" data-fa="'+fa+'" style="'+av+';cursor:pointer" onclick="window.__openFriend(this.dataset.fid,this.dataset.fn,this.dataset.fa)"></div>'
-              + '<div style="cursor:pointer;flex:1;min-width:0" data-fid="'+fid+'" data-fn="'+fn+'" data-fa="'+fa+'" onclick="window.__openFriend(this.dataset.fid,this.dataset.fn,this.dataset.fa)">'
-              + '<div class="fname">'+esc(f.username||'друг')+'</div>'
-              + statLine
-              + '</div>'
-              + '<button class="mini-btn ghost" style="margin-left:6px;flex-shrink:0" data-fid="'+safeId(f.friendshipId)+'" onclick="event.stopPropagation();window.__removeFriend(this.dataset.fid)">Удалить</button>'
-              + '</div>';
+      const fid = safeId(f.id);
+      const fn = escAttr(f.username || 'друг');
+      const fa = escAttr(safeImgUrl(f.avatar_url));
+      return '<div class="friend-row" style="animation-delay:'+Math.min(i*0.04,0.28)+'s">'
+        + '<div class="fav" data-fid="'+fid+'" data-fn="'+fn+'" data-fa="'+fa+'" style="'+av+';cursor:pointer" onclick="window.__openFriend(this.dataset.fid,this.dataset.fn,this.dataset.fa)"></div>'
+        + '<div style="cursor:pointer;flex:1;min-width:0" data-fid="'+fid+'" data-fn="'+fn+'" data-fa="'+fa+'" onclick="window.__openFriend(this.dataset.fid,this.dataset.fn,this.dataset.fa)">'
+        + '<div class="fname">'+esc(f.username||'друг')+'</div>'
+        + statLine
+        + '</div>'
+        + '<button class="mini-btn ghost" style="margin-left:6px;flex-shrink:0" data-fid="'+safeId(f.friendshipId)+'" onclick="event.stopPropagation();window.__removeFriend(this.dataset.fid)">Удалить</button>'
+        + '</div>';
     }).join('');
   }
 
@@ -4877,16 +5067,16 @@
       reqBlock.style.display = '';
 
       reqList.innerHTML = incoming.map((r,i)=>{
-              const rq = r.requester || {};
-              const av = escAttr(safeImgUrl(rq.avatar_url));
-              return `
-              <div class="friend-row" style="animation-delay:${Math.min(i*0.05,0.3)}s">
-                <div class="fav" style="${av ? `background-image:url(${av})` : ''}"></div>
-                <div><div class="fname">${esc(rq.username)}</div></div>
-                <button class="mini-btn" data-rid="${safeId(r.id)}" data-accept="1" onclick="window.__respondReq(this.dataset.rid, this.dataset.accept==='1')">Принять</button>
-                <button class="mini-btn ghost" data-rid="${safeId(r.id)}" onclick="window.__respondReq(this.dataset.rid, false)">Скрыть</button>
-              </div>`;
-            }).join('');
+        const rq = r.requester || {};
+        const av = escAttr(safeImgUrl(rq.avatar_url));
+        return `
+        <div class="friend-row" style="animation-delay:${Math.min(i*0.05,0.3)}s">
+          <div class="fav" style="${av ? `background-image:url(${av})` : ''}"></div>
+          <div><div class="fname">${esc(rq.username)}</div></div>
+          <button class="mini-btn" data-rid="${safeId(r.id)}" data-accept="1" onclick="window.__respondReq(this.dataset.rid, this.dataset.accept==='1')">Принять</button>
+          <button class="mini-btn ghost" data-rid="${safeId(r.id)}" onclick="window.__respondReq(this.dataset.rid, false)">Скрыть</button>
+        </div>`;
+      }).join('');
     } else {
       reqBlock.style.display = 'none';
     }
@@ -5044,7 +5234,7 @@
       box.style.display = '';
 
       box.innerHTML = `<div>Вы оба были в <b>${common.length}</b> ${common.length===1?'стране':common.length<5?'странах':'странах'}</div>
-              <div class="rm-tags">${common.slice(0,12).map(c => `<span class="rm-tag">${esc(c)}</span>`).join('')}${common.length>12?'<span class="rm-tag">…</span>':''}</div>`;
+        <div class="rm-tags">${common.slice(0,12).map(c => `<span class="rm-tag">${esc(c)}</span>`).join('')}${common.length>12?'<span class="rm-tag">…</span>':''}</div>`;
     }catch(e){
       box.style.display = 'none';
     }
@@ -5744,7 +5934,7 @@ document.getElementById('igModalMeta').textContent = metaLine;
     });
   })();
 
-  
+
   const feedListBtn = document.getElementById('feedListMode');
   const feedCalBtn = document.getElementById('feedCalMode');
   if(feedListBtn) feedListBtn.addEventListener('click', ()=>{
@@ -5783,7 +5973,13 @@ document.getElementById('igModalMeta').textContent = metaLine;
   })();
 
 
+  function showUxHintsOff(){
+    // подсказки на глобусе в демо-режиме не нужны: они про «добавь место»,
+    // а добавления в read-only нет
+    try{ const b = document.getElementById('globeBox'); if(b) b.querySelectorAll('.ux-hint').forEach(x=>x.remove()); }catch(e){}
+  }
   function showUxHints(){
+    if(readOnly) return;
     csGet('ux_hints_seen').then(seen=>{
       if(seen === '1') return;
       const box = document.getElementById('globeBox');
@@ -5949,16 +6145,43 @@ document.getElementById('igModalMeta').textContent = metaLine;
 
 
   // ---------- Nominatim autocomplete ----------
-  async function nominatimSearch(query, extraParams){
-    const params = new URLSearchParams({
-      format: 'jsonv2', q: query, 'accept-language': 'ru', limit: '7', addressdetails: '1', ...extraParams
-    });
-    try{
-      const res = await fetch('https://nominatim.openstreetmap.org/search?'+params.toString(), {
-        headers: { 'Accept-Language': 'ru' }
+  // Nominatim — общий для всех полей поиска. Публичный инстанс просит не чаще ~1 запроса
+  // в секунду, поэтому: очередь (не более одного активного запроса) + отмена устаревших.
+  const NOMINATIM_MIN_GAP_MS = 1100;
+  let __nomTail = Promise.resolve();
+  let __nomLastAt = 0;
+  let __nomCtrl = null;
+  async function nominatimSearch(query, extraParams, opts){
+    const ctrl = new AbortController();
+    // новый запрос отменяет предыдущий, если он ещё в полёте (пользователь допечатал)
+    if(__nomCtrl){ try{ __nomCtrl.abort(); }catch(e){} }
+    __nomCtrl = ctrl;
+    const run = async ()=>{
+      const wait = __nomLastAt + NOMINATIM_MIN_GAP_MS - Date.now();
+      if(wait > 0) await new Promise(r=>setTimeout(r, wait));
+      __nomLastAt = Date.now();
+      const params = new URLSearchParams({
+        format: 'jsonv2', q: query, 'accept-language': 'ru', limit: '7', addressdetails: '1', ...extraParams
       });
-      return await res.json();
-    }catch(e){ return []; }
+      try{
+        const res = await fetch('https://nominatim.openstreetmap.org/search?'+params.toString(), {
+          headers: { 'Accept-Language': 'ru' },
+          signal: ctrl.signal
+        });
+        if(!res.ok) return [];
+        return await res.json();
+      }catch(e){
+        if(e && (e.name === 'AbortError' || e.name === 'CanceledError')) return null; // нас отменили — не считаем ошибкой
+        return [];
+      }
+    };
+    // хвост промиса = «когда предыдущий запрос закончился»
+    const mine = __nomTail.then(run, run);
+    __nomTail = mine.then(()=>{}, ()=>{});
+    const out = await mine;
+    if(out === null) return [];      // отменённый запрос: не перерисовываем поле
+    if(opts && opts.stale && opts.stale()) return [];
+    return out || [];
   }
 
   let countryTimer = null;
@@ -6046,11 +6269,20 @@ document.getElementById('igModalMeta').textContent = metaLine;
         canvas.width = w; canvas.height = h;
         const ctx = canvas.getContext('2d');
         ctx.drawImage(img, 0, 0, w, h);
-        canvas.toBlob((blob)=>{
-          if(!blob){ resolve(file); return; }
-          const outName = (file.name || 'photo').replace(/\.[^.]+$/, '') + '.jpg';
-          resolve(new File([blob], outName, { type: 'image/jpeg' }));
-        }, 'image/jpeg', quality);
+        // WebP там, где движок умеет (Chromium/Android, iOS>=14) — примерно на треть меньше.
+        // Если toBlob отдал не webp, тихо повторяем в jpeg: картинка обязана загрузиться.
+        canvas.toBlob((webp)=>{
+          if(webp && webp.type === 'image/webp'){
+            const name = (file.name || 'photo').replace(/\.[^.]+$/, '') + '.webp';
+            resolve(new File([webp], name, { type: 'image/webp' }));
+            return;
+          }
+          canvas.toBlob((blob)=>{
+            if(!blob){ resolve(file); return; }
+            const outName = (file.name || 'photo').replace(/\.[^.]+$/, '') + '.jpg';
+            resolve(new File([blob], outName, { type: 'image/jpeg' }));
+          }, 'image/jpeg', quality);
+        }, 'image/webp', quality);
       };
       img.onerror = ()=>{ URL.revokeObjectURL(url); resolve(file); };
       img.src = url;
@@ -6142,9 +6374,10 @@ document.getElementById('igModalMeta').textContent = metaLine;
       const rawPhotos = Array.from(document.getElementById('addPhoto').files || []).slice(0, 3);
       if(newPlace && rawPhotos.length){
         for(let i = 0; i < rawPhotos.length; i++){
-          const photoFile = await compressImageFile(rawPhotos[i], 900, 0.65);
-          const path = `${myUserId}/${newPlace.id}-${Date.now()}-${i}.jpg`;
-          const { error: upErr } = await supabase.storage.from('place-photos').upload(path, photoFile, { contentType: 'image/jpeg', upsert: false });
+          const photoFile = await compressImageFile(rawPhotos[i], 900, 0.68);
+          const type = photoFile && photoFile.type === 'image/webp' ? 'image/webp' : 'image/jpeg';
+          const path = `${myUserId}/newPlace.id-${Date.now()}-${i}.${type === 'image/webp' ? 'webp' : 'jpg'}`;
+          const { error: upErr } = await supabase.storage.from('place-photos').upload(path, photoFile, { contentType: type, upsert: false });
           if(upErr){
             alert('Место сохранено, но фото #'+(i+1)+' не загрузилось: '+upErr.message);
           } else {
@@ -6183,8 +6416,10 @@ document.getElementById('igModalMeta').textContent = metaLine;
   });
 
   window.__deletePlace = async function(id){
-    try{ await supabase.from('photos').delete().eq('place_id', id); }catch(e){}
-    await supabase.from('places').delete().eq('id', id);
+    if(!myUserId) return; // без своего id удалять нечего
+    const sid = safeId(id);
+    try{ await supabase.from('photos').delete().eq('place_id', sid).eq('user_id', myUserId); }catch(e){}
+    await supabase.from('places').delete().eq('id', sid).eq('user_id', myUserId);
     try{ document.getElementById('editModal').classList.add('hide'); }catch(e){}
     try{ document.getElementById('igPlaceModal').classList.add('hide'); }catch(e){}
     try{ sfx('soft'); haptic('light'); }catch(e){}
@@ -6208,11 +6443,13 @@ document.getElementById('igModalMeta').textContent = metaLine;
 
   function applyGlobeFilter(){
     const photos = window.__ownPhotosCache || {};
+    // индекс по id: раньше было find() по всему списку на каждый пин — O(n^2) при сотне мест
+    const byId = new Map((allPlacesCache || []).map(x => [x.id, x]));
     placeMarkers.forEach(m => {
       try{
         const el = m.getElement();
         const id = el && el.dataset && el.dataset.placeId;
-        const p = (allPlacesCache || []).find(x => x.id === id);
+        const p = byId.get(id);
         if(!p){ if(el) el.style.display = ''; return; }
         let show = true;
         if(globeFilter === 'visited') show = !p.is_wishlist;
@@ -7363,8 +7600,9 @@ document.getElementById('igModalMeta').textContent = metaLine;
     const btn = document.getElementById('editDeleteBtn');
     if(btn){ btn.disabled = true; btn.textContent = 'Удаляю…'; }
     try{
-      try{ await supabase.from('photos').delete().eq('place_id', p.id); }catch(e){}
-      const { error } = await supabase.from('places').delete().eq('id', p.id);
+      // только свои места: id друга физически существует в той же таблице
+      try{ await supabase.from('photos').delete().eq('place_id', p.id).eq('user_id', myUserId); }catch(e){}
+      const { error } = await supabase.from('places').delete().eq('id', p.id).eq('user_id', myUserId);
       if(error){ alert('Не удалось удалить: ' + (error.message || 'ошибка')); return; }
       editingPlace = null;
       try{ document.getElementById('editModal').classList.add('hide'); }catch(e){}
@@ -7383,12 +7621,11 @@ document.getElementById('igModalMeta').textContent = metaLine;
     if(btn.classList.contains('loading')) return;
     btn.classList.add('loading');
     try{
-
       await supabase.from('places').update({
-              note: cleanNote(document.getElementById('editNote').value),
-              visit_date: cleanDate((function(){ const el=document.getElementById('editDate'); return el && el.value; })()),
-              is_wishlist: document.getElementById('editWishlist').checked
-            }).eq('id', editingPlace.id).eq('user_id', myUserId);
+        note: cleanNote(document.getElementById('editNote').value),
+        visit_date: cleanDate((function(){ const el=document.getElementById('editDate'); return el && el.value; })()),
+        is_wishlist: document.getElementById('editWishlist').checked
+      }).eq('id', editingPlace.id).eq('user_id', myUserId);
 
       const rawPhotos = Array.from(document.getElementById('editPhoto').files || []).slice(0, 3);
       if(rawPhotos.length){
@@ -7400,9 +7637,10 @@ document.getElementById('igModalMeta').textContent = metaLine;
           alert('Уже 3 фото на это место');
         }
         for(let i = 0; i < toUpload.length; i++){
-          const photoFile = await compressImageFile(toUpload[i], 900, 0.65);
-          const path = `${myUserId}/${editingPlace.id}-${Date.now()}-${i}.jpg`;
-          const { error: upErr } = await supabase.storage.from('place-photos').upload(path, photoFile, { contentType: 'image/jpeg', upsert: false });
+          const photoFile = await compressImageFile(toUpload[i], 900, 0.68);
+          const type = photoFile && photoFile.type === 'image/webp' ? 'image/webp' : 'image/jpeg';
+          const path = `${myUserId}/editingPlace.id-${Date.now()}-${i}.${type === 'image/webp' ? 'webp' : 'jpg'}`;
+          const { error: upErr } = await supabase.storage.from('place-photos').upload(path, photoFile, { contentType: type, upsert: false });
           if(!upErr){
             const { data: pub } = supabase.storage.from('place-photos').getPublicUrl(path);
             await supabase.from('photos').insert({ place_id: editingPlace.id, url: pub.publicUrl });
@@ -7513,40 +7751,39 @@ document.getElementById('igModalMeta').textContent = metaLine;
 
 
     function renderDiary(p){
-          const u = userMap[p.user_id] || { username: 'друг' };
-          const photos = photosByPlace[p.id] || [];
-          const title = esc(p.city ? (p.city + ', ' + p.country) : (p.country || ''));
-          const when = safeDate(p.visit_date);
-          const pid = safeId(p.id);
-          const uid = safeId(p.user_id);
-          const note = p.note ? ('<div class="diary-note">' + escMultiline(p.note, LIMITS.note) + '</div>') : '';
-          const photo = escAttr(safeImgUrl(photos[0]));
-          return '<article class="diary-entry">'
-            + '<div class="diary-tape" aria-hidden="true"></div>'
-            + '<div class="diary-head">'
-            + '<div class="diary-who" data-uid="'+uid+'" onclick="window.__openFriendProfile&&window.__openFriendProfile(this.dataset.uid)">'+esc(u.username||'друг')+'</div>'
-            + (when ? ('<div class="diary-when">'+esc(when)+'</div>') : '')
-            + '</div>'
-            + '<div class="diary-polaroid" data-pid="'+pid+'" onclick="window.__openPlaceView(this.dataset.pid)">'
-            + '<div class="dp-photo" style="background-image:url('+photo+')"></div>'
-            + '<div class="dp-caption">'+title+'</div>'
-            + '</div>'
-            + note
-            + '</article>';
+      const u = userMap[p.user_id] || { username: 'друг' };
+      const photos = photosByPlace[p.id] || [];
+      const title = esc(p.city ? (p.city + ', ' + p.country) : (p.country || ''));
+      const when = safeDate(p.visit_date);
+      const pid = safeId(p.id);
+      const uid = safeId(p.user_id);
+      const note = p.note ? ('<div class="diary-note">' + escMultiline(p.note, LIMITS.note) + '</div>') : '';
+      const photo = escAttr(safeImgUrl(photos[0]));
+      return '<article class="diary-entry">'
+        + '<div class="diary-tape" aria-hidden="true"></div>'
+        + '<div class="diary-head">'
+        + '<div class="diary-who" data-uid="'+uid+'" onclick="window.__openFriendProfile&&window.__openFriendProfile(this.dataset.uid)">'+esc(u.username||'друг')+'</div>'
+        + (when ? ('<div class="diary-when">'+esc(when)+'</div>') : '')
+        + '</div>'
+        + '<div class="diary-polaroid" data-pid="'+pid+'" onclick="window.__openPlaceView(this.dataset.pid)">'
+        + '<div class="dp-photo" style="background-image:url('+photo+')"></div>'
+        + '<div class="dp-caption">'+title+'</div>'
+        + '</div>'
+        + note
+        + '</article>';
     }
 
-
     function renderCollapse(row){
-          const u = userMap[row.userId] || { username: 'друг' };
-          const avUrl = safeImgUrl(u.avatar_url);
-          const av = avUrl ? ('background-image:url('+escAttr(avUrl)+')') : '';
-          const sample = row.sample || {};
-          const title = esc(sample.city || sample.country || 'место');
-          const more = row.count > 1 ? (' и ещё ' + (row.count - 1)) : '';
-          const uid = safeId(row.userId);
-          return '<div class="diary-collapse" data-uid="'+uid+'" onclick="window.__openFriendProfile&&window.__openFriendProfile(this.dataset.uid)">'
-            + '<div class="dc-av" style="'+av+'"></div>'
-            + '<div><b>'+esc(u.username||'друг')+'</b> отметил(а) '+title+more
+      const u = userMap[row.userId] || { username: 'друг' };
+      const avUrl = safeImgUrl(u.avatar_url);
+      const av = avUrl ? ('background-image:url('+escAttr(avUrl)+')') : '';
+      const sample = row.sample || {};
+      const title = esc(sample.city || sample.country || 'место');
+      const more = row.count > 1 ? (' и ещё ' + (row.count - 1)) : '';
+      const uid = safeId(row.userId);
+      return '<div class="diary-collapse" data-uid="'+uid+'" onclick="window.__openFriendProfile&&window.__openFriendProfile(this.dataset.uid)">'
+        + '<div class="dc-av" style="'+av+'"></div>'
+        + '<div><b>'+esc(u.username||'друг')+'</b> отметил(а) '+title+more
         + '<div style="font-size:11px;margin-top:2px;opacity:.8">без снимка</div></div></div>';
     }
 
@@ -7562,7 +7799,7 @@ document.getElementById('igModalMeta').textContent = metaLine;
     attachDefaultPhotos(places, photosByPlace);
   }
 
-  
+
     window.__saveToWishlist = async function(placeId){
     if(!myUserId) return;
     const p = (window.__feedPlacesCache || []).find(x => x.id === placeId);
@@ -7670,22 +7907,22 @@ document.getElementById('igModalMeta').textContent = metaLine;
   }
 
   function rankRowHtml(u, pos, countries){
-      // без inline-данных в onclick: имя/аватар друга идут через data-* и читаются из dataset
-      const uid = safeId(u.id);
-      const av = safeImgUrl(u.avatar_url);
-      return `<div class="rank-row" data-fid="${uid}" data-fn="${escAttr(u.username||'')}" data-fa="${escAttr(av)}" style="cursor:pointer">
-        <div class="rank-pos">${Number(pos) || 0}</div>
-        <div class="fav" style="${av?`background-image:url(${escAttr(av)})`:''}"></div>
-        <div><div class="rank-name">${esc(u.username||'user')}</div><div class="rank-meta">${esc(countries)} стран</div></div>
-        <span style="margin-left:auto;color:var(--muted);">›</span>
-      </div>`;
-    }
-    // делегирование кликов по строкам рейтинга (вместо onclick с интерполяцией)
-    document.addEventListener('click', (e)=>{
-      const row = e.target && e.target.closest ? e.target.closest('.rank-row[data-fid]') : null;
-      if(!row) return;
-      try{ window.__openFriend(row.dataset.fid, row.dataset.fn, row.dataset.fa); }catch(err){}
-    });
+    // без inline-данных в onclick: имя/аватар друга идут через data-* и читаются из dataset
+    const uid = safeId(u.id);
+    const av = safeImgUrl(u.avatar_url);
+    return `<div class="rank-row" data-fid="${uid}" data-fn="${escAttr(u.username||'')}" data-fa="${escAttr(av)}" style="cursor:pointer">
+      <div class="rank-pos">${Number(pos) || 0}</div>
+      <div class="fav" style="${av?`background-image:url(${escAttr(av)})`:''}"></div>
+      <div><div class="rank-name">${esc(u.username||'user')}</div><div class="rank-meta">${esc(countries)} стран</div></div>
+      <span style="margin-left:auto;color:var(--muted);">›</span>
+    </div>`;
+  }
+  // делегирование кликов по строкам рейтинга (вместо onclick с интерполяцией)
+  document.addEventListener('click', (e)=>{
+    const row = e.target && e.target.closest ? e.target.closest('.rank-row[data-fid]') : null;
+    if(!row) return;
+    try{ window.__openFriend(row.dataset.fid, row.dataset.fn, row.dataset.fa); }catch(err){}
+  });
   async function loadRankings(){
     // instant paint from cache
     try{
@@ -7775,6 +8012,24 @@ document.getElementById('igModalMeta').textContent = metaLine;
   }
 
   // wrap add save with rate limit
+}
+
+// ---------- bootstrapper ----------
+(function(){
+  const LIBS = ()=> !!(window.supabase && window.supabase.createClient && window.maplibregl);
+  let tries = 0;
+  function boot(){
+    if(LIBS()){ try{ __maplinkMain(); }catch(e){ console.error('MapLink boot failed', e); } return; }
+    // CDN не ответил (медленная сеть/блокировка) — повторяем недолго, потом понятное сообщение
+    if(++tries > 400){
+      const el = document.getElementById('connStatus');
+      if(el) el.textContent = 'не удалось загрузить карты/базу — проверь сеть';
+      return;
+    }
+    setTimeout(boot, 40);
+  }
+  if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
+  else boot();
 })();
 </script>
 

@@ -1,0 +1,17 @@
+{
+  "name": "maplink-verify",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Проверки index.html: синтаксис, CSS, id в разметке, бут в 3 окружениях, stored XSS, read-only guard",
+  "type": "module",
+  "scripts": {
+    "verify": "node verify.mjs && ML_MODE=webdemo node verify.mjs && ML_MODE=webgate node verify.mjs",
+    "verify:tg": "ML_MODE=tg node verify.mjs",
+    "verify:demo": "ML_MODE=webdemo node verify.mjs",
+    "verify:gate": "ML_MODE=webgate node verify.mjs"
+  },
+  "devDependencies": {
+    "jsdom": "^24.0.0",
+    "postcss": "^8.4.0"
+  }
+}
