@@ -4,7 +4,7 @@
   это значит Tengizka продолжает работу над MapLink с тобой. Коротко о проекте:
 
   ЧТО ЭТО: Telegram Mini App (один файл index.html) + Supabase (Postgres+Storage) + MapLibre GL (3D-глобус).
-  Деплой: GitHub Pages (tengizka.github.io/MapLink/). Подарок другу на день рождения 17-19 августа.
+  Деплой: GitHub Pages (tengizka.fun/maplink/). Подарок другу на день рождения 17-19 августа.
 
   АУТЕНТИФИКАЦИЯ: anon key, identity = telegram_id (Supabase Auth НЕ используется).
   ТАБЛИЦЫ (не дропать!): users, places, photos, friendships, achievements, reactions, comments.
@@ -4356,7 +4356,7 @@
       ' — ' + countries.length + ' стран. Собирай моменты 🌍';
     if(tg && tg.openTelegramLink){
       // share via Telegram share URL
-      const url = 'https://t.me/share/url?url=' + encodeURIComponent('https://tengizka.github.io/MapLink/') +
+      const url = 'https://t.me/share/url?url=' + encodeURIComponent('https://tengizka.fun/maplink/') +
         '&text=' + encodeURIComponent(text);
       tg.openTelegramLink(url);
     } else if(navigator.share){
